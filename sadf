@@ -1,425 +1,152 @@
--- ============================================================
--- SCRIPT USERS HIGHLIGHT v2 — исправленная версия
--- ============================================================
-local Players = game:GetService("Players")
+--// ================================================================
+--// SECURE HIGHLIGHT v2
+--// ================================================================
+
+--// ---- CONFIG ----
+local WORKER_URL      = "https://roblox-script-sync.azazanodnl.workers.dev/"
+local CLIENT_KEY      = "NBWHFhjq36rMFAGDfahg6236t43462uye%6wTY#2653TYfhd"
+local HIGHLIGHT_COLOR = Color3.fromRGB(0, 255, 100)
+local REAUTH_INTERVAL = 45
+local LIST_INTERVAL   = 5
+local DEBUG           = false
+--// --------------
+
+local Players     = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
+local LocalPlayer = Players.LocalPlayer
 
-local Player = Players.LocalPlayer
-local PlayerGui = Player:WaitForChild("PlayerGui")
+local httpRequest = (syn and syn.request)
+    or (http and http.request)
+    or (fluxus and fluxus.request)
+    or (krnl and krnl.request)
+    or (electron and electron.request)
+    or request
 
-local WORKER_URL = "https://roblox-script-sync.azazanodnl.workers.dev"
-local SECRET_KEY = "ixa_fail_hub_2026_xK9mPq7vN3wR8tL5bZ2yJ4hD6sA1cF0"
-local UPDATE_INTERVAL = 3
-local HEARTBEAT_INTERVAL = 15
+if not httpRequest then
+    warn("[SH] Нет HTTP-функции у executor'а")
+    return
+end
 
-local function httpRequest(options)
-    if typeof(request) == "function" then return request(options)
-    elseif syn and syn.request then return syn.request(options)
-    elseif http_request then return http_request(options)
-    elseif HttpService.RequestInternal then return HttpService:RequestInternal(options)
+local function log(...) if DEBUG then print("[SH]", ...) end end
+
+local function http(method, path, body)
+    local opts = {
+        Url = WORKER_URL .. path,
+        Method = method,
+        Headers = {
+            ["Content-Type"] = "application/json",
+            ["User-Agent"]   = "RobloxExecutor/1.0",
+        },
+    }
+    if body then opts.Body = HttpService:JSONEncode(body) end
+
+    local ok, res = pcall(httpRequest, opts)
+    if not ok or not res then log("http err", res); return nil end
+
+    local ok2, decoded = pcall(HttpService.JSONDecode, HttpService, res.Body)
+    if not ok2 then log("json err", res.Body); return nil end
+    return decoded
+end
+
+local token    = nil
+local tokenExp = 0
+
+local function fetchToken()
+    local res = http("POST", "/auth", {
+        userId    = LocalPlayer.UserId,
+        clientKey = CLIENT_KEY,
+    })
+    if type(res) ~= "table" or not res.ok or not res.token then
+        log("auth failed", res and res.error)
+        return false
     end
-    return nil
+    token    = res.token
+    tokenExp = res.exp or 0
+    log("token ok")
+    return true
 end
 
-local ScriptUsers = {
-    Enabled = false,
-    CurrentUsers = {},
-    Highlights = {},
-    CharConns = {},
-    HighlightColor = Color3.fromRGB(0, 255, 100),
-    MainLoop = nil,
-    HeartbeatLoop = nil,
-    DebugLog = {},
-}
-
--- Синхронные функции (блокируют до получения ответа)
-function ScriptUsers:HeartbeatSync()
-    local ok, err = pcall(function()
-        httpRequest({
-            Url = WORKER_URL .. "/users",
-            Method = "POST",
-            Headers = {
-                ["Content-Type"] = "application/json",
-                ["X-Auth-Key"] = SECRET_KEY,
-            },
-            Body = HttpService:JSONEncode({ userId = Player.UserId }),
-        })
-    end)
-    return ok, err
-end
-
-function ScriptUsers:FetchUsersSync()
-    local ok, result = pcall(function()
-        local response = httpRequest({
-            Url = WORKER_URL .. "/users",
-            Method = "GET",
-            Headers = { ["X-Auth-Key"] = SECRET_KEY },
-        })
-        if not response or not response.Body then
-            return nil, "no response"
-        end
-        local data = HttpService:JSONDecode(response.Body)
-        if type(data) ~= "table" then
-            return nil, "bad json"
-        end
-        return data
-    end)
-    
-    if not ok or not result then
-        return {}
+local function register()
+    if not token or (os.time() * 1000) > (tokenExp - 5000) then
+        if not fetchToken() then return end
     end
-    
-    local now = os.time()
-    local active = {}
-    for userId, timestamp in pairs(result) do
-        if type(timestamp) == "number" and now - timestamp < 60 then
-            active[tostring(userId)] = timestamp
-        end
-    end
-    
-    self.CurrentUsers = active
-    return active
-end
-
-function ScriptUsers:Unregister()
-    task.spawn(function()
-        pcall(function()
-            httpRequest({
-                Url = WORKER_URL .. "/users",
-                Method = "DELETE",
-                Headers = {
-                    ["Content-Type"] = "application/json",
-                    ["X-Auth-Key"] = SECRET_KEY,
-                },
-                Body = HttpService:JSONEncode({ userId = Player.UserId }),
-            })
-        end)
-    end)
-end
-
-function ScriptUsers:HighlightPlayer(player)
-    if self.Highlights[player] then return end
-    local function apply(char)
-        if not char then return end
-        local old = char:FindFirstChild("ScriptUserHighlight")
-        if old then old:Destroy() end
-        local hl = Instance.new("Highlight")
-        hl.Name = "ScriptUserHighlight"
-        hl.FillColor = self.HighlightColor
-        hl.FillTransparency = 0.5
-        hl.OutlineColor = self.HighlightColor
-        hl.OutlineTransparency = 0.1
-        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.Parent = char
-        self.Highlights[player] = hl
-    end
-    apply(player.Character)
-    if not self.CharConns[player] then
-        self.CharConns[player] = player.CharacterAdded:Connect(function(c)
-            if self.Enabled and self.CurrentUsers[tostring(player.UserId)] then
-                task.wait(0.5)
-                apply(c)
-            end
-        end)
-    end
-end
-
-function ScriptUsers:UnhighlightPlayer(player)
-    local hl = self.Highlights[player]
-    if hl then hl:Destroy() end
-    self.Highlights[player] = nil
-    if self.CharConns[player] then
-        self.CharConns[player]:Disconnect()
-        self.CharConns[player] = nil
-    end
-end
-
-function ScriptUsers:UpdateHighlights()
-    local highlighted = 0
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= Player then
-            if self.CurrentUsers[tostring(player.UserId)] then
-                self:HighlightPlayer(player)
-                highlighted = highlighted + 1
-            else
-                self:UnhighlightPlayer(player)
-            end
-        end
-    end
-    return highlighted
-end
-
--- Единый цикл: POST + GET + UpdateHighlights с правильными задержками
-function ScriptUsers:MainCycle()
-    task.spawn(function()
-        -- Сразу отмечаемся
-        self:HeartbeatSync()
-        task.wait(0.5)
-        
-        local lastHeartbeat = tick()
-        
-        while self.Enabled do
-            -- GET и обновление подсветки
-            self:FetchUsersSync()
-            self:UpdateHighlights()
-            
-            -- Heartbeat раз в HEARTBEAT_INTERVAL
-            if tick() - lastHeartbeat >= HEARTBEAT_INTERVAL then
-                self:HeartbeatSync()
-                lastHeartbeat = tick()
-            end
-            
-            task.wait(UPDATE_INTERVAL)
-        end
-    end)
-end
-
-function ScriptUsers:Start()
-    if self.Enabled then return end
-    self.Enabled = true
-    self:MainCycle()
-end
-
-function ScriptUsers:Stop()
-    self.Enabled = false
-    for player, _ in pairs(self.Highlights) do self:UnhighlightPlayer(player) end
-    self:Unregister()
-end
-
--- ============================================================
--- GUI
--- ============================================================
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "ScriptUsersUI"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = PlayerGui
-
-local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.fromOffset(300, 340)
-MainFrame.Position = UDim2.new(0, 20, 0, 100)
-MainFrame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.Draggable = true
-MainFrame.Parent = ScreenGui
-
-Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
-local Stroke = Instance.new("UIStroke", MainFrame)
-Stroke.Color = Color3.fromRGB(40, 42, 60)
-
-local Title = Instance.new("TextLabel", MainFrame)
-Title.Size = UDim2.new(1, -20, 0, 30)
-Title.Position = UDim2.fromOffset(10, 5)
-Title.BackgroundTransparency = 1
-Title.Text = "Script Users"
-Title.TextColor3 = Color3.fromRGB(0, 255, 100)
-Title.TextSize = 16
-Title.Font = Enum.Font.GothamBold
-Title.TextXAlignment = Enum.TextXAlignment.Left
-
-local StatusLabel = Instance.new("TextLabel", MainFrame)
-StatusLabel.Size = UDim2.new(1, -20, 0, 18)
-StatusLabel.Position = UDim2.fromOffset(10, 33)
-StatusLabel.BackgroundTransparency = 1
-StatusLabel.Text = "Выключено"
-StatusLabel.TextColor3 = Color3.fromRGB(150, 152, 168)
-StatusLabel.TextSize = 11
-StatusLabel.Font = Enum.Font.Gotham
-StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-local ToggleBtn = Instance.new("TextButton", MainFrame)
-ToggleBtn.Size = UDim2.new(1, -20, 0, 38)
-ToggleBtn.Position = UDim2.fromOffset(10, 58)
-ToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
-ToggleBtn.BorderSizePixel = 0
-ToggleBtn.Text = "ВКЛЮЧИТЬ"
-ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-ToggleBtn.TextSize = 14
-ToggleBtn.Font = Enum.Font.GothamBold
-Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 8)
-
-local MyIdLabel = Instance.new("TextLabel", MainFrame)
-MyIdLabel.Size = UDim2.new(1, -20, 0, 16)
-MyIdLabel.Position = UDim2.fromOffset(10, 100)
-MyIdLabel.BackgroundTransparency = 1
-MyIdLabel.Text = "Мой ID: " .. Player.UserId
-MyIdLabel.TextColor3 = Color3.fromRGB(150, 152, 168)
-MyIdLabel.TextSize = 10
-MyIdLabel.Font = Enum.Font.Code
-MyIdLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-local CountLabel = Instance.new("TextLabel", MainFrame)
-CountLabel.Size = UDim2.new(1, -20, 0, 20)
-CountLabel.Position = UDim2.fromOffset(10, 120)
-CountLabel.BackgroundTransparency = 1
-CountLabel.Text = "Найдено: 0 | В игре: 0"
-CountLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
-CountLabel.TextSize = 12
-CountLabel.Font = Enum.Font.Gotham
-CountLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-local RefreshBtn = Instance.new("TextButton", MainFrame)
-RefreshBtn.Size = UDim2.fromOffset(90, 24)
-RefreshBtn.Position = UDim2.new(1, -100, 0, 120)
-RefreshBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
-RefreshBtn.BorderSizePixel = 0
-RefreshBtn.Text = "Обновить"
-RefreshBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
-RefreshBtn.TextSize = 11
-RefreshBtn.Font = Enum.Font.Gotham
-Instance.new("UICorner", RefreshBtn).CornerRadius = UDim.new(0, 6)
-
--- Цвета
-local COLORS = {
-    Green = Color3.fromRGB(0, 255, 100),
-    Red = Color3.fromRGB(255, 80, 80),
-    Blue = Color3.fromRGB(80, 160, 255),
-    Purple = Color3.fromRGB(180, 100, 255),
-    Yellow = Color3.fromRGB(255, 220, 90),
-    Cyan = Color3.fromRGB(0, 220, 255),
-}
-local colorNames = {"Green", "Red", "Blue", "Purple", "Yellow", "Cyan"}
-
-local ColorRow = Instance.new("Frame", MainFrame)
-ColorRow.Size = UDim2.new(1, -20, 0, 36)
-ColorRow.Position = UDim2.fromOffset(10, 150)
-ColorRow.BackgroundTransparency = 1
-
-for i, name in ipairs(colorNames) do
-    local btn = Instance.new("TextButton", ColorRow)
-    btn.Size = UDim2.fromOffset(41, 32)
-    btn.Position = UDim2.fromOffset((i - 1) * 46, 0)
-    btn.BackgroundColor3 = COLORS[name]
-    btn.BorderSizePixel = 0
-    btn.Text = ""
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-    btn.MouseButton1Click:Connect(function()
-        ScriptUsers.HighlightColor = COLORS[name]
-        for _, hl in pairs(ScriptUsers.Highlights) do
-            if hl and hl.Parent then
-                hl.FillColor = COLORS[name]
-                hl.OutlineColor = COLORS[name]
-            end
-        end
-    end)
-end
-
--- Лог
-local LogTitle = Instance.new("TextLabel", MainFrame)
-LogTitle.Size = UDim2.new(1, -20, 0, 16)
-LogTitle.Position = UDim2.fromOffset(10, 195)
-LogTitle.BackgroundTransparency = 1
-LogTitle.Text = "Лог (последние 8 событий):"
-LogTitle.TextColor3 = Color3.fromRGB(120, 122, 140)
-LogTitle.TextSize = 10
-LogTitle.Font = Enum.Font.GothamBold
-LogTitle.TextXAlignment = Enum.TextXAlignment.Left
-
-local LogLabel = Instance.new("TextLabel", MainFrame)
-LogLabel.Size = UDim2.new(1, -20, 1, -220)
-LogLabel.Position = UDim2.fromOffset(10, 215)
-LogLabel.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
-LogLabel.BorderSizePixel = 0
-LogLabel.Text = ""
-LogLabel.TextColor3 = Color3.fromRGB(180, 200, 180)
-LogLabel.TextSize = 10
-LogLabel.Font = Enum.Font.Code
-LogLabel.TextXAlignment = Enum.TextXAlignment.Left
-LogLabel.TextYAlignment = Enum.TextYAlignment.Top
-LogLabel.TextWrapped = true
-Instance.new("UICorner", LogLabel).CornerRadius = UDim.new(0, 6)
-local LogPad = Instance.new("UIPadding", LogLabel)
-LogPad.PaddingLeft = UDim.new(0, 6)
-LogPad.PaddingTop = UDim.new(0, 4)
-
--- Функция лога
-function ScriptUsers:Log(msg)
-    table.insert(self.DebugLog, os.date("%H:%M:%S") .. " " .. msg)
-    while #self.DebugLog > 8 do
-        table.remove(self.DebugLog, 1)
-    end
-    LogLabel.Text = table.concat(self.DebugLog, "\n")
-end
-
-local function updateUI()
-    if ScriptUsers.Enabled then
-        ToggleBtn.Text = "ВЫКЛЮЧИТЬ"
-        ToggleBtn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
-        StatusLabel.Text = "● Активно"
-        StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
+    local res = http("POST", "/register", { token = token })
+    if type(res) == "table" and res.ok then
+        log("heartbeat ok")
     else
-        ToggleBtn.Text = "ВКЛЮЧИТЬ"
-        ToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
-        StatusLabel.Text = "○ Выключено"
-        StatusLabel.TextColor3 = Color3.fromRGB(150, 152, 168)
+        log("heartbeat fail", res and res.error)
+        token = nil
     end
 end
 
-ToggleBtn.MouseButton1Click:Connect(function()
-    if ScriptUsers.Enabled then
-        ScriptUsers:Stop()
-        ScriptUsers:Log("Выключено")
-    else
-        ScriptUsers:Start()
-        ScriptUsers:Log("Запуск...")
-        task.wait(1)
-        ScriptUsers:Log("POST + GET отправлены")
-    end
-    updateUI()
-end)
+if not fetchToken() then
+    warn("[SH] Не удалось авторизоваться на сервере")
+    return
+end
+register()
 
-RefreshBtn.MouseButton1Click:Connect(function()
-    task.spawn(function()
-        ScriptUsers:HeartbeatSync()
-        task.wait(0.4)
-        ScriptUsers:FetchUsersSync()
-        task.wait(0.2)
-        local n = ScriptUsers:UpdateHighlights()
-        ScriptUsers:Log("Обновлено вручную. Подсвечено: " .. n)
-    end)
-end)
-
--- Обновление счётчика и лога списка
 task.spawn(function()
-    while true do
-        task.wait(1)
-        local myId = tostring(Player.UserId)
-        local totalInList = 0
-        local inGame = 0
-        local listStr = {}
-        
-        for userId, _ in pairs(ScriptUsers.CurrentUsers) do
-            totalInList = totalInList + 1
-            if userId ~= myId then
-                local name = nil
-                for _, p in ipairs(Players:GetPlayers()) do
-                    if tostring(p.UserId) == userId then
-                        name = p.Name
-                        break
-                    end
-                end
-                if name then
-                    inGame = inGame + 1
-                    table.insert(listStr, "✓ " .. name)
-                else
-                    table.insert(listStr, "? " .. userId:sub(-6))
-                end
+    while task.wait(REAUTH_INTERVAL) do
+        pcall(register)
+    end
+end)
+
+local highlights = {}
+
+local function attachHighlight(plr)
+    if plr == LocalPlayer then return end
+    local char = plr.Character
+    if not char or not char:IsDescendantOf(workspace) then return end
+
+    if highlights[plr] and highlights[plr].Adornee == char then return end
+    if highlights[plr] then pcall(function() highlights[plr]:Destroy() end) end
+
+    local hl = Instance.new("Highlight")
+    hl.Name                = "__SH_HL"
+    hl.FillColor           = HIGHLIGHT_COLOR
+    hl.OutlineColor        = Color3.new(1, 1, 1)
+    hl.FillTransparency    = 0.55
+    hl.OutlineTransparency = 0
+    hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Adornee             = char
+    hl.Parent              = char
+    highlights[plr]        = hl
+end
+
+local function detachHighlight(plr)
+    if highlights[plr] then
+        pcall(function() highlights[plr]:Destroy() end)
+        highlights[plr] = nil
+    end
+end
+
+task.spawn(function()
+    while task.wait(LIST_INTERVAL) do
+        local list = http("GET", "/list")
+        if type(list) ~= "table" then continue end
+
+        local active = {}
+        for _, id in ipairs(list) do active[id] = true end
+
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if active[plr.UserId] then
+                attachHighlight(plr)
+            else
+                detachHighlight(plr)
             end
-        end
-        
-        CountLabel.Text = "Найдено: " .. (totalInList - 1) .. " | В игре: " .. inGame
-        
-        if #listStr > 0 then
-            local preview = {}
-            for i = 1, math.min(3, #listStr) do
-                table.insert(preview, listStr[i])
-            end
-            -- не перезаписываем лог, просто выводим справа
         end
     end
 end)
 
-updateUI()
-ScriptUsers:Log("Загружено. Мой ID: " .. Player.UserId)
-print("[Script Users] Загружено!")
+Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        detachHighlight(plr)
+    end)
+end)
+
+Players.PlayerRemoving:Connect(detachHighlight)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    for plr in pairs(highlights) do detachHighlight(plr) end
+end)
