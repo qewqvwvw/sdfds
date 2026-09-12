@@ -1,152 +1,106 @@
---// ================================================================
---// SECURE HIGHLIGHT v2
---// ================================================================
-
---// ---- CONFIG ----
-local WORKER_URL      = "https://roblox-script-sync.azazanodnl.workers.dev/"
-local CLIENT_KEY      = "NBWHFhjq36rMFAGDfahg6236t43462uye%6wTY#2653TYfhd"
-local HIGHLIGHT_COLOR = Color3.fromRGB(0, 255, 100)
-local REAUTH_INTERVAL = 45
-local LIST_INTERVAL   = 5
-local DEBUG           = false
---// --------------
-
-local Players     = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+
+-- ⚠️ НАСТРОЙКИ (замени на свои)
+local API_URL = "https://players-tracker-kv.azazanodnl.workers.dev/"
+local API_KEY = "sdgsda-sadgsmna-sgsd4sd-sd4ssdhh"
+
 local LocalPlayer = Players.LocalPlayer
+local HIGHLIGHT_NAME = "ScriptUserHighlight"
 
-local httpRequest = (syn and syn.request)
-    or (http and http.request)
-    or (fluxus and fluxus.request)
-    or (krnl and krnl.request)
-    or (electron and electron.request)
-    or request
-
-if not httpRequest then
-    warn("[SH] Нет HTTP-функции у executor'а")
-    return
+-- Отправка heartbeat (сообщаем что мы онлайн и используем скрипт)
+local function sendHeartbeat()
+    pcall(function()
+        request({
+            Url = API_URL .. "/heartbeat",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+                ["X-API-Key"] = API_KEY
+            },
+            Body = HttpService:JSONEncode({
+                userId = LocalPlayer.UserId,
+                placeId = game.PlaceId,
+                jobId = game.JobId
+            })
+        })
+    end)
 end
 
-local function log(...) if DEBUG then print("[SH]", ...) end end
-
-local function http(method, path, body)
-    local opts = {
-        Url = WORKER_URL .. path,
-        Method = method,
-        Headers = {
-            ["Content-Type"] = "application/json",
-            ["User-Agent"]   = "RobloxExecutor/1.0",
-        },
-    }
-    if body then opts.Body = HttpService:JSONEncode(body) end
-
-    local ok, res = pcall(httpRequest, opts)
-    if not ok or not res then log("http err", res); return nil end
-
-    local ok2, decoded = pcall(HttpService.JSONDecode, HttpService, res.Body)
-    if not ok2 then log("json err", res.Body); return nil end
-    return decoded
-end
-
-local token    = nil
-local tokenExp = 0
-
-local function fetchToken()
-    local res = http("POST", "/auth", {
-        userId    = LocalPlayer.UserId,
-        clientKey = CLIENT_KEY,
-    })
-    if type(res) ~= "table" or not res.ok or not res.token then
-        log("auth failed", res and res.error)
-        return false
-    end
-    token    = res.token
-    tokenExp = res.exp or 0
-    log("token ok")
-    return true
-end
-
-local function register()
-    if not token or (os.time() * 1000) > (tokenExp - 5000) then
-        if not fetchToken() then return end
-    end
-    local res = http("POST", "/register", { token = token })
-    if type(res) == "table" and res.ok then
-        log("heartbeat ok")
-    else
-        log("heartbeat fail", res and res.error)
-        token = nil
+-- Очистка всех подсветок
+local function clearHighlights()
+    for _, player in pairs(Players:GetPlayers()) do
+        local char = player.Character
+        if char then
+            local h = char:FindFirstChild(HIGHLIGHT_NAME)
+            if h then h:Destroy() end
+        end
     end
 end
 
-if not fetchToken() then
-    warn("[SH] Не удалось авторизоваться на сервере")
-    return
-end
-register()
+-- Получение списка юзеров скрипта и подсветка их
+local function updateHighlights()
+    local success, response = pcall(function()
+        return request({
+            Url = API_URL .. "/players?placeId=" .. game.PlaceId .. "&jobId=" .. game.JobId,
+            Method = "GET",
+            Headers = {
+                ["X-API-Key"] = API_KEY
+            }
+        })
+    end)
 
-task.spawn(function()
-    while task.wait(REAUTH_INTERVAL) do
-        pcall(register)
+    if not success or response.StatusCode ~= 200 then
+        return
     end
-end)
 
-local highlights = {}
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(response.Body)
+    end)
 
-local function attachHighlight(plr)
-    if plr == LocalPlayer then return end
-    local char = plr.Character
-    if not char or not char:IsDescendantOf(workspace) then return end
-
-    if highlights[plr] and highlights[plr].Adornee == char then return end
-    if highlights[plr] then pcall(function() highlights[plr]:Destroy() end) end
-
-    local hl = Instance.new("Highlight")
-    hl.Name                = "__SH_HL"
-    hl.FillColor           = HIGHLIGHT_COLOR
-    hl.OutlineColor        = Color3.new(1, 1, 1)
-    hl.FillTransparency    = 0.55
-    hl.OutlineTransparency = 0
-    hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
-    hl.Adornee             = char
-    hl.Parent              = char
-    highlights[plr]        = hl
-end
-
-local function detachHighlight(plr)
-    if highlights[plr] then
-        pcall(function() highlights[plr]:Destroy() end)
-        highlights[plr] = nil
+    if not ok or not data.players then
+        return
     end
-end
 
-task.spawn(function()
-    while task.wait(LIST_INTERVAL) do
-        local list = http("GET", "/list")
-        if type(list) ~= "table" then continue end
+    clearHighlights()
 
-        local active = {}
-        for _, id in ipairs(list) do active[id] = true end
-
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if active[plr.UserId] then
-                attachHighlight(plr)
-            else
-                detachHighlight(plr)
+    for _, userId in ipairs(data.players) do
+        local player = Players:GetPlayerByUserId(userId)
+        if player and player ~= LocalPlayer then
+            local char = player.Character
+            if char then
+                local highlight = Instance.new("Highlight")
+                highlight.Name = HIGHLIGHT_NAME
+                highlight.FillColor = Color3.fromRGB(255, 0, 0)
+                highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+                highlight.FillTransparency = 0.5
+                highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                highlight.Parent = char
             end
         end
     end
+end
+
+-- Обновляем при заходе новых игроков
+Players.PlayerAdded:Connect(function()
+    task.wait(2)
+    updateHighlights()
 end)
 
-Players.PlayerAdded:Connect(function(plr)
-    plr.CharacterAdded:Connect(function()
-        task.wait(0.5)
-        detachHighlight(plr)
-    end)
+-- Цикл heartbeat (каждые 10 сек)
+spawn(function()
+    while true do
+        sendHeartbeat()
+        wait(10)
+    end
 end)
 
-Players.PlayerRemoving:Connect(detachHighlight)
-
-LocalPlayer.CharacterAdded:Connect(function()
-    for plr in pairs(highlights) do detachHighlight(plr) end
+-- Цикл обновления подсветок (каждые 3 сек)
+spawn(function()
+    while true do
+        updateHighlights()
+        wait(3)
+    end
 end)
+
+print("[Script Tracker] Loaded successfully!")
