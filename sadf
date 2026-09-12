@@ -1,0 +1,397 @@
+-- ============================================================
+-- SCRIPT USERS HIGHLIGHT — ГОТОВЫЙ КОД
+-- ============================================================
+
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+
+-- ============================================================
+-- НАСТРОЙКИ (⚠️ ЗАМЕНИ КЛЮЧ!)
+-- ============================================================
+local WORKER_URL = "https://roblox-script-sync.azazanodnl.workers.dev"
+local SECRET_KEY = "ixa_hub_2026_xK9mPq7vN3wR8tL5bZ2yJ4hD6sA1cF0"
+local UPDATE_INTERVAL = 5
+local HEARTBEAT_INTERVAL = 20
+local HTTP_TIMEOUT = 3
+
+-- ============================================================
+-- HTTP helper с таймаутом (не фризит игру)
+-- ============================================================
+local function httpRequest(options)
+    if typeof(request) == "function" then
+        return request(options)
+    elseif syn and syn.request then
+        return syn.request(options)
+    elseif http_request then
+        return http_request(options)
+    elseif HttpService.RequestInternal then
+        return HttpService:RequestInternal(options)
+    end
+    return nil
+end
+
+local function httpRequestAsync(options)
+    local done = false
+    local result = nil
+    task.spawn(function()
+        pcall(function()
+            result = httpRequest(options)
+        end)
+        done = true
+    end)
+    local start = tick()
+    while not done and tick() - start < HTTP_TIMEOUT do
+        task.wait(0.05)
+    end
+    return done and result or nil
+end
+
+-- ============================================================
+-- SCRIPT USERS
+-- ============================================================
+local ScriptUsers = {
+    Enabled = false,
+    CurrentUsers = {},
+    Highlights = {},
+    CharConns = {},
+    MainLoop = nil,
+    HeartbeatLoop = nil,
+    HighlightColor = Color3.fromRGB(0, 255, 100),
+    FillTransparency = 0.5,
+    OutlineTransparency = 0.1,
+}
+
+function ScriptUsers:Heartbeat()
+    task.spawn(function()
+        pcall(function()
+            httpRequestAsync({
+                Url = WORKER_URL .. "/users",
+                Method = "POST",
+                Headers = {
+                    ["Content-Type"] = "application/json",
+                    ["X-Auth-Key"] = SECRET_KEY,
+                },
+                Body = HttpService:JSONEncode({ userId = Player.UserId }),
+            })
+        end)
+    end)
+end
+
+function ScriptUsers:Unregister()
+    task.spawn(function()
+        pcall(function()
+            httpRequestAsync({
+                Url = WORKER_URL .. "/users",
+                Method = "DELETE",
+                Headers = {
+                    ["Content-Type"] = "application/json",
+                    ["X-Auth-Key"] = SECRET_KEY,
+                },
+                Body = HttpService:JSONEncode({ userId = Player.UserId }),
+            })
+        end)
+    end)
+end
+
+function ScriptUsers:FetchUsers()
+    task.spawn(function()
+        pcall(function()
+            local response = httpRequestAsync({
+                Url = WORKER_URL .. "/users",
+                Method = "GET",
+                Headers = { ["X-Auth-Key"] = SECRET_KEY },
+            })
+            if not response or not response.Body then return end
+            local data = HttpService:JSONDecode(response.Body)
+            if type(data) ~= "table" then return end
+            local now = os.time()
+            local active = {}
+            for userId, timestamp in pairs(data) do
+                if type(timestamp) == "number" and now - timestamp < 60 then
+                    active[tostring(userId)] = timestamp
+                end
+            end
+            self.CurrentUsers = active
+        end)
+    end)
+end
+
+function ScriptUsers:HighlightPlayer(player)
+    if self.Highlights[player] then return end
+    local function apply(char)
+        if not char then return end
+        local old = char:FindFirstChild("ScriptUserHighlight")
+        if old then old:Destroy() end
+        local hl = Instance.new("Highlight")
+        hl.Name = "ScriptUserHighlight"
+        hl.FillColor = self.HighlightColor
+        hl.FillTransparency = self.FillTransparency
+        hl.OutlineColor = self.HighlightColor
+        hl.OutlineTransparency = self.OutlineTransparency
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent = char
+        self.Highlights[player] = hl
+    end
+    apply(player.Character)
+    if not self.CharConns[player] then
+        self.CharConns[player] = player.CharacterAdded:Connect(function(c)
+            if self.Enabled and self.CurrentUsers[tostring(player.UserId)] then
+                task.wait(0.5); apply(c)
+            end
+        end)
+    end
+end
+
+function ScriptUsers:UnhighlightPlayer(player)
+    local hl = self.Highlights[player]
+    if hl then hl:Destroy() end
+    self.Highlights[player] = nil
+    if self.CharConns[player] then
+        self.CharConns[player]:Disconnect()
+        self.CharConns[player] = nil
+    end
+end
+
+function ScriptUsers:UpdateHighlights()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= Player then
+            if self.CurrentUsers[tostring(player.UserId)] then
+                self:HighlightPlayer(player)
+            else
+                self:UnhighlightPlayer(player)
+            end
+        end
+    end
+end
+
+function ScriptUsers:Start()
+    if self.Enabled then return end
+    self.Enabled = true
+    self:Heartbeat()
+    self:FetchUsers()
+    task.wait(0.6)
+    self:UpdateHighlights()
+
+    self.MainLoop = task.spawn(function()
+        while self.Enabled do
+            task.wait(UPDATE_INTERVAL)
+            if not self.Enabled then break end
+            self:FetchUsers()
+            self:UpdateHighlights()
+        end
+    end)
+
+    self.HeartbeatLoop = task.spawn(function()
+        while self.Enabled do
+            task.wait(HEARTBEAT_INTERVAL)
+            if not self.Enabled then break end
+            self:Heartbeat()
+        end
+    end)
+
+    if not self._PlayerAdded then
+        self._PlayerAdded = Players.PlayerAdded:Connect(function(p)
+            task.wait(1)
+            if self.Enabled then self:FetchUsers(); task.wait(0.3); self:UpdateHighlights() end
+        end)
+        self._PlayerRemoving = Players.PlayerRemoving:Connect(function(p)
+            self:UnhighlightPlayer(p)
+        end)
+    end
+end
+
+function ScriptUsers:Stop()
+    self.Enabled = false
+    if self.MainLoop then task.cancel(self.MainLoop); self.MainLoop = nil end
+    if self.HeartbeatLoop then task.cancel(self.HeartbeatLoop); self.HeartbeatLoop = nil end
+    for player, _ in pairs(self.Highlights) do self:UnhighlightPlayer(player) end
+    self:Unregister()
+end
+
+-- ============================================================
+-- GUI
+-- ============================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "ScriptUsersUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.fromOffset(280, 220)
+MainFrame.Position = UDim2.new(0, 20, 0, 100)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 12)
+Corner.Parent = MainFrame
+
+local Stroke = Instance.new("UIStroke")
+Stroke.Color = Color3.fromRGB(40, 42, 60)
+Stroke.Thickness = 1
+Stroke.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -20, 0, 40)
+Title.Position = UDim2.fromOffset(10, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "Script Users"
+Title.TextColor3 = Color3.fromRGB(0, 255, 100)
+Title.TextSize = 16
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = MainFrame
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, -20, 0, 20)
+StatusLabel.Position = UDim2.fromOffset(10, 36)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "Выключено"
+StatusLabel.TextColor3 = Color3.fromRGB(150, 152, 168)
+StatusLabel.TextSize = 12
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.Parent = MainFrame
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(1, -20, 0, 40)
+ToggleBtn.Position = UDim2.fromOffset(10, 65)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
+ToggleBtn.BorderSizePixel = 0
+ToggleBtn.Text = "ВКЛЮЧИТЬ"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.TextSize = 14
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.Parent = MainFrame
+
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(0, 8)
+ToggleCorner.Parent = ToggleBtn
+
+local CountLabel = Instance.new("TextLabel")
+CountLabel.Size = UDim2.new(1, -20, 0, 20)
+CountLabel.Position = UDim2.fromOffset(10, 112)
+CountLabel.BackgroundTransparency = 1
+CountLabel.Text = "Найдено: 0"
+CountLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
+CountLabel.TextSize = 12
+CountLabel.Font = Enum.Font.Gotham
+CountLabel.TextXAlignment = Enum.TextXAlignment.Left
+CountLabel.Parent = MainFrame
+
+-- Кнопка "Обновить"
+local RefreshBtn = Instance.new("TextButton")
+RefreshBtn.Size = UDim2.fromOffset(80, 22)
+RefreshBtn.Position = UDim2.new(1, -90, 0, 112)
+RefreshBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
+RefreshBtn.BorderSizePixel = 0
+RefreshBtn.Text = "Обновить"
+RefreshBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
+RefreshBtn.TextSize = 11
+RefreshBtn.Font = Enum.Font.Gotham
+RefreshBtn.Parent = MainFrame
+
+local RefreshCorner = Instance.new("UICorner")
+RefreshCorner.CornerRadius = UDim.new(0, 6)
+RefreshCorner.Parent = RefreshBtn
+
+RefreshBtn.MouseButton1Click:Connect(function()
+    ScriptUsers:FetchUsers()
+    task.wait(0.5)
+    ScriptUsers:UpdateHighlights()
+end)
+
+-- Цвета
+local COLORS = {
+    Green = Color3.fromRGB(0, 255, 100),
+    Red = Color3.fromRGB(255, 80, 80),
+    Blue = Color3.fromRGB(80, 160, 255),
+    Purple = Color3.fromRGB(180, 100, 255),
+    Yellow = Color3.fromRGB(255, 220, 90),
+    Cyan = Color3.fromRGB(0, 220, 255),
+}
+
+local ColorRow = Instance.new("Frame")
+ColorRow.Size = UDim2.new(1, -20, 0, 36)
+ColorRow.Position = UDim2.fromOffset(10, 140)
+ColorRow.BackgroundTransparency = 1
+ColorRow.Parent = MainFrame
+
+local colorNames = {"Green", "Red", "Blue", "Purple", "Yellow", "Cyan"}
+for i, name in ipairs(colorNames) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(38, 32)
+    btn.Position = UDim2.fromOffset((i - 1) * 43, 0)
+    btn.BackgroundColor3 = COLORS[name]
+    btn.BorderSizePixel = 0
+    btn.Text = ""
+    btn.Parent = ColorRow
+
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, 6)
+    c.Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        ScriptUsers.HighlightColor = COLORS[name]
+        if ScriptUsers.Enabled then
+            for player, hl in pairs(ScriptUsers.Highlights) do
+                if hl and hl.Parent then
+                    hl.FillColor = COLORS[name]
+                    hl.OutlineColor = COLORS[name]
+                end
+            end
+        end
+    end)
+end
+
+-- ============================================================
+-- UI логика
+-- ============================================================
+local function updateUI()
+    if ScriptUsers.Enabled then
+        ToggleBtn.Text = "ВЫКЛЮЧИТЬ"
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+        StatusLabel.Text = "Активно"
+        StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 100)
+    else
+        ToggleBtn.Text = "ВКЛЮЧИТЬ"
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
+        StatusLabel.Text = "Выключено"
+        StatusLabel.TextColor3 = Color3.fromRGB(150, 152, 168)
+    end
+end
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    if ScriptUsers.Enabled then
+        ScriptUsers:Stop()
+    else
+        ScriptUsers:Start()
+    end
+    updateUI()
+end)
+
+-- Счётчик (исключая себя)
+task.spawn(function()
+    while true do
+        task.wait(1)
+        local count = 0
+        local myId = tostring(Player.UserId)
+        for userId, _ in pairs(ScriptUsers.CurrentUsers) do
+            if userId ~= myId then
+                count = count + 1
+            end
+        end
+        CountLabel.Text = "Найдено: " .. count
+    end
+end)
+
+updateUI()
+
+print("[Script Users Highlight] Загружено! Нажми 'ВКЛЮЧИТЬ'.")
