@@ -8,7 +8,7 @@ local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
 
 local WORKER_URL = "https://roblox-script-sync.azazanodnl.workers.dev"
-local SECRET_KEY = "ixa_hub_2026_xK9mPq7vN3wR8tL5bZ2yJ4hD6sA1cF0"
+local SECRET_KEY = "ixa_fail_hub_2026_xK9mPq7vN3wR8tL5bZ2yJ4hD6sA1cF0"
 local UPDATE_INTERVAL = 3
 local HEARTBEAT_INTERVAL = 15
 
