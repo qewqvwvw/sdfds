@@ -1,5 +1,5 @@
 -- ============================================================
--- SCRIPT USERS HIGHLIGHT
+-- SCRIPT USERS HIGHLIGHT v2 — исправленная версия
 -- ============================================================
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -29,22 +29,56 @@ local ScriptUsers = {
     HighlightColor = Color3.fromRGB(0, 255, 100),
     MainLoop = nil,
     HeartbeatLoop = nil,
+    DebugLog = {},
 }
 
-function ScriptUsers:Heartbeat()
-    task.spawn(function()
-        pcall(function()
-            httpRequest({
-                Url = WORKER_URL .. "/users",
-                Method = "POST",
-                Headers = {
-                    ["Content-Type"] = "application/json",
-                    ["X-Auth-Key"] = SECRET_KEY,
-                },
-                Body = HttpService:JSONEncode({ userId = Player.UserId }),
-            })
-        end)
+-- Синхронные функции (блокируют до получения ответа)
+function ScriptUsers:HeartbeatSync()
+    local ok, err = pcall(function()
+        httpRequest({
+            Url = WORKER_URL .. "/users",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+                ["X-Auth-Key"] = SECRET_KEY,
+            },
+            Body = HttpService:JSONEncode({ userId = Player.UserId }),
+        })
     end)
+    return ok, err
+end
+
+function ScriptUsers:FetchUsersSync()
+    local ok, result = pcall(function()
+        local response = httpRequest({
+            Url = WORKER_URL .. "/users",
+            Method = "GET",
+            Headers = { ["X-Auth-Key"] = SECRET_KEY },
+        })
+        if not response or not response.Body then
+            return nil, "no response"
+        end
+        local data = HttpService:JSONDecode(response.Body)
+        if type(data) ~= "table" then
+            return nil, "bad json"
+        end
+        return data
+    end)
+    
+    if not ok or not result then
+        return {}
+    end
+    
+    local now = os.time()
+    local active = {}
+    for userId, timestamp in pairs(result) do
+        if type(timestamp) == "number" and now - timestamp < 60 then
+            active[tostring(userId)] = timestamp
+        end
+    end
+    
+    self.CurrentUsers = active
+    return active
 end
 
 function ScriptUsers:Unregister()
@@ -59,29 +93,6 @@ function ScriptUsers:Unregister()
                 },
                 Body = HttpService:JSONEncode({ userId = Player.UserId }),
             })
-        end)
-    end)
-end
-
-function ScriptUsers:FetchUsers()
-    task.spawn(function()
-        pcall(function()
-            local response = httpRequest({
-                Url = WORKER_URL .. "/users",
-                Method = "GET",
-                Headers = { ["X-Auth-Key"] = SECRET_KEY },
-            })
-            if not response or not response.Body then return end
-            local data = HttpService:JSONDecode(response.Body)
-            if type(data) ~= "table" then return end
-            local now = os.time()
-            local active = {}
-            for userId, timestamp in pairs(data) do
-                if type(timestamp) == "number" and now - timestamp < 60 then
-                    active[tostring(userId)] = timestamp
-                end
-            end
-            self.CurrentUsers = active
         end)
     end)
 end
@@ -106,7 +117,8 @@ function ScriptUsers:HighlightPlayer(player)
     if not self.CharConns[player] then
         self.CharConns[player] = player.CharacterAdded:Connect(function(c)
             if self.Enabled and self.CurrentUsers[tostring(player.UserId)] then
-                task.wait(0.5); apply(c)
+                task.wait(0.5)
+                apply(c)
             end
         end)
     end
@@ -123,61 +135,53 @@ function ScriptUsers:UnhighlightPlayer(player)
 end
 
 function ScriptUsers:UpdateHighlights()
+    local highlighted = 0
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= Player then
             if self.CurrentUsers[tostring(player.UserId)] then
                 self:HighlightPlayer(player)
+                highlighted = highlighted + 1
             else
                 self:UnhighlightPlayer(player)
             end
         end
     end
+    return highlighted
+end
+
+-- Единый цикл: POST + GET + UpdateHighlights с правильными задержками
+function ScriptUsers:MainCycle()
+    task.spawn(function()
+        -- Сразу отмечаемся
+        self:HeartbeatSync()
+        task.wait(0.5)
+        
+        local lastHeartbeat = tick()
+        
+        while self.Enabled do
+            -- GET и обновление подсветки
+            self:FetchUsersSync()
+            self:UpdateHighlights()
+            
+            -- Heartbeat раз в HEARTBEAT_INTERVAL
+            if tick() - lastHeartbeat >= HEARTBEAT_INTERVAL then
+                self:HeartbeatSync()
+                lastHeartbeat = tick()
+            end
+            
+            task.wait(UPDATE_INTERVAL)
+        end
+    end)
 end
 
 function ScriptUsers:Start()
     if self.Enabled then return end
     self.Enabled = true
-    self:Heartbeat()
-    task.wait(0.3)
-    self:FetchUsers()
-    task.wait(0.3)
-    self:UpdateHighlights()
-
-    self.MainLoop = task.spawn(function()
-        while self.Enabled do
-            task.wait(UPDATE_INTERVAL)
-            if not self.Enabled then break end
-            self:FetchUsers()
-            self:UpdateHighlights()
-        end
-    end)
-    self.HeartbeatLoop = task.spawn(function()
-        while self.Enabled do
-            task.wait(HEARTBEAT_INTERVAL)
-            if not self.Enabled then break end
-            self:Heartbeat()
-        end
-    end)
-
-    if not self._PlayerAdded then
-        self._PlayerAdded = Players.PlayerAdded:Connect(function(p)
-            task.wait(1)
-            if self.Enabled then
-                self:FetchUsers()
-                task.wait(0.3)
-                self:UpdateHighlights()
-            end
-        end)
-        self._PlayerRemoving = Players.PlayerRemoving:Connect(function(p)
-            self:UnhighlightPlayer(p)
-        end)
-    end
+    self:MainCycle()
 end
 
 function ScriptUsers:Stop()
     self.Enabled = false
-    if self.MainLoop then task.cancel(self.MainLoop); self.MainLoop = nil end
-    if self.HeartbeatLoop then task.cancel(self.HeartbeatLoop); self.HeartbeatLoop = nil end
     for player, _ in pairs(self.Highlights) do self:UnhighlightPlayer(player) end
     self:Unregister()
 end
@@ -192,7 +196,7 @@ ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = PlayerGui
 
 local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.fromOffset(280, 260)
+MainFrame.Size = UDim2.fromOffset(300, 340)
 MainFrame.Position = UDim2.new(0, 20, 0, 100)
 MainFrame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
 MainFrame.BorderSizePixel = 0
@@ -235,19 +239,29 @@ ToggleBtn.TextSize = 14
 ToggleBtn.Font = Enum.Font.GothamBold
 Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 8)
 
+local MyIdLabel = Instance.new("TextLabel", MainFrame)
+MyIdLabel.Size = UDim2.new(1, -20, 0, 16)
+MyIdLabel.Position = UDim2.fromOffset(10, 100)
+MyIdLabel.BackgroundTransparency = 1
+MyIdLabel.Text = "Мой ID: " .. Player.UserId
+MyIdLabel.TextColor3 = Color3.fromRGB(150, 152, 168)
+MyIdLabel.TextSize = 10
+MyIdLabel.Font = Enum.Font.Code
+MyIdLabel.TextXAlignment = Enum.TextXAlignment.Left
+
 local CountLabel = Instance.new("TextLabel", MainFrame)
-CountLabel.Size = UDim2.new(1, -110, 0, 20)
-CountLabel.Position = UDim2.fromOffset(10, 102)
+CountLabel.Size = UDim2.new(1, -20, 0, 20)
+CountLabel.Position = UDim2.fromOffset(10, 120)
 CountLabel.BackgroundTransparency = 1
-CountLabel.Text = "Найдено: 0"
+CountLabel.Text = "Найдено: 0 | В игре: 0"
 CountLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
 CountLabel.TextSize = 12
 CountLabel.Font = Enum.Font.Gotham
 CountLabel.TextXAlignment = Enum.TextXAlignment.Left
 
 local RefreshBtn = Instance.new("TextButton", MainFrame)
-RefreshBtn.Size = UDim2.fromOffset(80, 22)
-RefreshBtn.Position = UDim2.new(1, -90, 0, 102)
+RefreshBtn.Size = UDim2.fromOffset(90, 24)
+RefreshBtn.Position = UDim2.new(1, -100, 0, 120)
 RefreshBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
 RefreshBtn.BorderSizePixel = 0
 RefreshBtn.Text = "Обновить"
@@ -256,6 +270,7 @@ RefreshBtn.TextSize = 11
 RefreshBtn.Font = Enum.Font.Gotham
 Instance.new("UICorner", RefreshBtn).CornerRadius = UDim.new(0, 6)
 
+-- Цвета
 local COLORS = {
     Green = Color3.fromRGB(0, 255, 100),
     Red = Color3.fromRGB(255, 80, 80),
@@ -264,24 +279,24 @@ local COLORS = {
     Yellow = Color3.fromRGB(255, 220, 90),
     Cyan = Color3.fromRGB(0, 220, 255),
 }
+local colorNames = {"Green", "Red", "Blue", "Purple", "Yellow", "Cyan"}
 
 local ColorRow = Instance.new("Frame", MainFrame)
 ColorRow.Size = UDim2.new(1, -20, 0, 36)
-ColorRow.Position = UDim2.fromOffset(10, 130)
+ColorRow.Position = UDim2.fromOffset(10, 150)
 ColorRow.BackgroundTransparency = 1
 
-local colorNames = {"Green", "Red", "Blue", "Purple", "Yellow", "Cyan"}
 for i, name in ipairs(colorNames) do
     local btn = Instance.new("TextButton", ColorRow)
-    btn.Size = UDim2.fromOffset(38, 32)
-    btn.Position = UDim2.fromOffset((i - 1) * 43, 0)
+    btn.Size = UDim2.fromOffset(41, 32)
+    btn.Position = UDim2.fromOffset((i - 1) * 46, 0)
     btn.BackgroundColor3 = COLORS[name]
     btn.BorderSizePixel = 0
     btn.Text = ""
     Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
     btn.MouseButton1Click:Connect(function()
         ScriptUsers.HighlightColor = COLORS[name]
-        for player, hl in pairs(ScriptUsers.Highlights) do
+        for _, hl in pairs(ScriptUsers.Highlights) do
             if hl and hl.Parent then
                 hl.FillColor = COLORS[name]
                 hl.OutlineColor = COLORS[name]
@@ -290,18 +305,42 @@ for i, name in ipairs(colorNames) do
     end)
 end
 
--- Лог список
-local ListLabel = Instance.new("TextLabel", MainFrame)
-ListLabel.Size = UDim2.new(1, -20, 0, 60)
-ListLabel.Position = UDim2.fromOffset(10, 175)
-ListLabel.BackgroundTransparency = 1
-ListLabel.Text = ""
-ListLabel.TextColor3 = Color3.fromRGB(150, 152, 168)
-ListLabel.TextSize = 10
-ListLabel.Font = Enum.Font.Code
-ListLabel.TextXAlignment = Enum.TextXAlignment.Left
-ListLabel.TextYAlignment = Enum.TextYAlignment.Top
-ListLabel.TextWrapped = true
+-- Лог
+local LogTitle = Instance.new("TextLabel", MainFrame)
+LogTitle.Size = UDim2.new(1, -20, 0, 16)
+LogTitle.Position = UDim2.fromOffset(10, 195)
+LogTitle.BackgroundTransparency = 1
+LogTitle.Text = "Лог (последние 8 событий):"
+LogTitle.TextColor3 = Color3.fromRGB(120, 122, 140)
+LogTitle.TextSize = 10
+LogTitle.Font = Enum.Font.GothamBold
+LogTitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local LogLabel = Instance.new("TextLabel", MainFrame)
+LogLabel.Size = UDim2.new(1, -20, 1, -220)
+LogLabel.Position = UDim2.fromOffset(10, 215)
+LogLabel.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
+LogLabel.BorderSizePixel = 0
+LogLabel.Text = ""
+LogLabel.TextColor3 = Color3.fromRGB(180, 200, 180)
+LogLabel.TextSize = 10
+LogLabel.Font = Enum.Font.Code
+LogLabel.TextXAlignment = Enum.TextXAlignment.Left
+LogLabel.TextYAlignment = Enum.TextYAlignment.Top
+LogLabel.TextWrapped = true
+Instance.new("UICorner", LogLabel).CornerRadius = UDim.new(0, 6)
+local LogPad = Instance.new("UIPadding", LogLabel)
+LogPad.PaddingLeft = UDim.new(0, 6)
+LogPad.PaddingTop = UDim.new(0, 4)
+
+-- Функция лога
+function ScriptUsers:Log(msg)
+    table.insert(self.DebugLog, os.date("%H:%M:%S") .. " " .. msg)
+    while #self.DebugLog > 8 do
+        table.remove(self.DebugLog, 1)
+    end
+    LogLabel.Text = table.concat(self.DebugLog, "\n")
+end
 
 local function updateUI()
     if ScriptUsers.Enabled then
@@ -318,47 +357,69 @@ local function updateUI()
 end
 
 ToggleBtn.MouseButton1Click:Connect(function()
-    if ScriptUsers.Enabled then ScriptUsers:Stop() else ScriptUsers:Start() end
+    if ScriptUsers.Enabled then
+        ScriptUsers:Stop()
+        ScriptUsers:Log("Выключено")
+    else
+        ScriptUsers:Start()
+        ScriptUsers:Log("Запуск...")
+        task.wait(1)
+        ScriptUsers:Log("POST + GET отправлены")
+    end
     updateUI()
 end)
 
 RefreshBtn.MouseButton1Click:Connect(function()
-    ScriptUsers:Heartbeat()
-    task.wait(0.3)
-    ScriptUsers:FetchUsers()
-    task.wait(0.5)
-    ScriptUsers:UpdateHighlights()
+    task.spawn(function()
+        ScriptUsers:HeartbeatSync()
+        task.wait(0.4)
+        ScriptUsers:FetchUsersSync()
+        task.wait(0.2)
+        local n = ScriptUsers:UpdateHighlights()
+        ScriptUsers:Log("Обновлено вручную. Подсвечено: " .. n)
+    end)
 end)
 
--- Обновление UI каждую секунду
+-- Обновление счётчика и лога списка
 task.spawn(function()
     while true do
         task.wait(1)
         local myId = tostring(Player.UserId)
-        local list = {}
-        local found = 0
+        local totalInList = 0
+        local inGame = 0
+        local listStr = {}
+        
         for userId, _ in pairs(ScriptUsers.CurrentUsers) do
+            totalInList = totalInList + 1
             if userId ~= myId then
-                found = found + 1
-                -- Ищем имя игрока в игре
-                local name = "?"
+                local name = nil
                 for _, p in ipairs(Players:GetPlayers()) do
                     if tostring(p.UserId) == userId then
                         name = p.Name
                         break
                     end
                 end
-                table.insert(list, name .. " (" .. userId:sub(-4) .. ")")
+                if name then
+                    inGame = inGame + 1
+                    table.insert(listStr, "✓ " .. name)
+                else
+                    table.insert(listStr, "? " .. userId:sub(-6))
+                end
             end
         end
-        CountLabel.Text = "Найдено: " .. found
-        if #list > 0 then
-            ListLabel.Text = "В игре:\n" .. table.concat(list, "\n")
-        else
-            ListLabel.Text = ""
+        
+        CountLabel.Text = "Найдено: " .. (totalInList - 1) .. " | В игре: " .. inGame
+        
+        if #listStr > 0 then
+            local preview = {}
+            for i = 1, math.min(3, #listStr) do
+                table.insert(preview, listStr[i])
+            end
+            -- не перезаписываем лог, просто выводим справа
         end
     end
 end)
 
 updateUI()
-print("[Script Users] Загружено! Работает при условии что оба игрока включили тумблер.")
+ScriptUsers:Log("Загружено. Мой ID: " .. Player.UserId)
+print("[Script Users] Загружено!")
